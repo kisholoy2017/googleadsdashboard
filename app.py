@@ -74,6 +74,10 @@ if 'campaign_data' not in st.session_state:
     st.session_state.campaign_data = None
 if 'product_data' not in st.session_state:
     st.session_state.product_data = None
+if 'daily_data' not in st.session_state:
+    st.session_state.daily_data = None
+if 'daily_data_camp' not in st.session_state:
+    st.session_state.daily_data_camp = None
 
 # Helper Functions
 def create_google_ads_client(developer_token, client_id, client_secret, refresh_token, login_customer_id=None):
@@ -237,6 +241,118 @@ def process_dataframe(df):
     df['aov'] = df.apply(lambda x: x['conversions_value'] / x['conversions'] if x['conversions'] > 0 else 0, axis=1)
     
     return df
+
+def fetch_daily_performance(client, customer_id, start_date, end_date):
+    """Fetch daily performance data for time-series charts"""
+    try:
+        ga_service = client.get_service("GoogleAdsService")
+        
+        query = f"""
+            SELECT
+                segments.date,
+                campaign.name,
+                metrics.cost_micros,
+                metrics.clicks,
+                metrics.impressions,
+                metrics.conversions,
+                metrics.conversions_value
+            FROM campaign
+            WHERE segments.date BETWEEN '{format_date_for_query(start_date)}' 
+                AND '{format_date_for_query(end_date)}'
+                AND campaign.status != 'REMOVED'
+            ORDER BY segments.date
+        """
+        
+        response = ga_service.search(customer_id=customer_id, query=query)
+        
+        data = []
+        for row in response:
+            daily_data = {
+                'date': row.segments.date,
+                'campaign_name': row.campaign.name,
+                'cost': row.metrics.cost_micros / 1_000_000,
+                'clicks': row.metrics.clicks,
+                'impressions': row.metrics.impressions,
+                'conversions': row.metrics.conversions,
+                'conversions_value': row.metrics.conversions_value,
+            }
+            data.append(daily_data)
+        
+        df = pd.DataFrame(data)
+        if not df.empty:
+            df['date'] = pd.to_datetime(df['date'])
+            # Calculate derived metrics
+            df['cpc'] = df.apply(lambda x: x['cost'] / x['clicks'] if x['clicks'] > 0 else 0, axis=1)
+            df['ctr'] = df.apply(lambda x: (x['clicks'] / x['impressions'] * 100) if x['impressions'] > 0 else 0, axis=1)
+            df['cost_per_conv'] = df.apply(lambda x: x['cost'] / x['conversions'] if x['conversions'] > 0 else 0, axis=1)
+            df['conv_value_cost'] = df.apply(lambda x: x['conversions_value'] / x['cost'] if x['cost'] > 0 else 0, axis=1)
+            df['aov'] = df.apply(lambda x: x['conversions_value'] / x['conversions'] if x['conversions'] > 0 else 0, axis=1)
+        
+        return df
+    
+    except Exception as e:
+        st.error(f"Error fetching daily data: {str(e)}")
+        return pd.DataFrame()
+
+def create_time_series_chart(df, metric, metric_label):
+    """Create beautiful time-series chart similar to the uploaded image"""
+    
+    # Aggregate by date
+    daily_agg = df.groupby('date')[metric].sum().reset_index()
+    
+    # Create figure
+    fig = go.Figure()
+    
+    # Add main line with gradient color
+    fig.add_trace(go.Scatter(
+        x=daily_agg['date'],
+        y=daily_agg[metric],
+        mode='lines',
+        name=metric_label,
+        line=dict(
+            color='rgb(0, 204, 204)',  # Teal/cyan color
+            width=3,
+            shape='spline'  # Smooth curves
+        ),
+        fill='tozeroy',
+        fillcolor='rgba(0, 204, 204, 0.1)'
+    ))
+    
+    # Update layout for clean appearance
+    fig.update_layout(
+        title=dict(
+            text=f"{metric_label} Over Time",
+            font=dict(size=20, color='#333')
+        ),
+        xaxis=dict(
+            title="",
+            showgrid=True,
+            gridcolor='rgba(200, 200, 200, 0.2)',
+            showline=True,
+            linecolor='rgba(200, 200, 200, 0.5)'
+        ),
+        yaxis=dict(
+            title="",
+            showgrid=True,
+            gridcolor='rgba(200, 200, 200, 0.2)',
+            showline=False
+        ),
+        plot_bgcolor='white',
+        paper_bgcolor='white',
+        hovermode='x unified',
+        height=400,
+        margin=dict(l=50, r=50, t=80, b=50),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=-0.2,
+            xanchor="center",
+            x=0.5,
+            font=dict(size=12)
+        )
+    )
+    
+    return fig
 
 def calculate_comparison(current_df, comparison_df):
     """Calculate percentage changes between two dataframes"""
@@ -518,9 +634,10 @@ def main():
             
             # Campaign filter
             st.markdown("---")
-            campaign_filter = st.selectbox(
-                "Filter by Campaign (Optional)",
-                ["All Campaigns"],
+            campaign_filter = st.text_input(
+                "Filter by Campaign Name (Optional)",
+                placeholder="Type exact campaign name...",
+                help="Enter the exact campaign name to filter results",
                 key="agg_campaign_filter"
             )
             
@@ -534,9 +651,18 @@ def main():
                         end_date
                     )
                     
+                    # Fetch daily data for charts
+                    daily_df = fetch_daily_performance(
+                        st.session_state.client,
+                        st.session_state.customer_id,
+                        start_date,
+                        end_date
+                    )
+                    
                     if not campaign_df.empty:
                         campaign_df = process_dataframe(campaign_df)
                         st.session_state.campaign_data = campaign_df
+                        st.session_state.daily_data = daily_df
                         
                         # Update campaign filter options
                         campaign_names = ["All Campaigns"] + campaign_df['campaign_name'].unique().tolist()
@@ -590,11 +716,18 @@ def main():
                 comparison_df = st.session_state.aggregate_data['comparison']
                 compare_opt = st.session_state.aggregate_data['compare_option']
                 
-                # Filter by campaign if selected
-                if campaign_filter != "All Campaigns":
-                    current_df = current_df[current_df['campaign_name'] == campaign_filter]
+                # Filter by campaign if specified
+                if campaign_filter and campaign_filter.strip():
+                    # Filter current data
+                    current_df = current_df[current_df['campaign_name'].str.contains(campaign_filter, case=False, na=False)]
                     if not comparison_df.empty:
-                        comparison_df = comparison_df[comparison_df['campaign_name'] == campaign_filter]
+                        comparison_df = comparison_df[comparison_df['campaign_name'].str.contains(campaign_filter, case=False, na=False)]
+                    
+                    if current_df.empty:
+                        st.warning(f"No campaigns found matching '{campaign_filter}'")
+                        st.stop()
+                    else:
+                        st.info(f"Showing data for campaigns matching: '{campaign_filter}'")
                 
                 # Calculate totals and changes
                 if not comparison_df.empty:
@@ -697,6 +830,63 @@ def main():
                         changes['aov_change'],
                         'currency'
                     ), unsafe_allow_html=True)
+                
+                # NEW: Add Conversions metric
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    st.markdown(display_metric_card(
+                        "Conversions",
+                        current_totals['conversions'],
+                        changes['conversions_change'],
+                        'number'
+                    ), unsafe_allow_html=True)
+                
+                # Time-series charts section
+                if st.session_state.daily_data is not None and not st.session_state.daily_data.empty:
+                    st.markdown("---")
+                    st.subheader("📈 Performance Over Time")
+                    
+                    daily_data = st.session_state.daily_data
+                    
+                    # Filter daily data by campaign if needed
+                    if campaign_filter and campaign_filter.strip():
+                        daily_data = daily_data[daily_data['campaign_name'].str.contains(campaign_filter, case=False, na=False)]
+                    
+                    if not daily_data.empty:
+                        # Metric selector
+                        col1, col2 = st.columns([3, 1])
+                        
+                        with col1:
+                            metric_options = {
+                                'cost': 'Cost',
+                                'clicks': 'Clicks',
+                                'impressions': 'Impressions',
+                                'conversions': 'Conversions',
+                                'conversions_value': 'Conversion Value',
+                                'ctr': 'CTR (%)',
+                                'cpc': 'CPC',
+                                'conv_value_cost': 'Conv Value/Cost',
+                                'cost_per_conv': 'Cost per Conversion',
+                                'aov': 'Average Order Value'
+                            }
+                            
+                            selected_metric = st.selectbox(
+                                "Select Metric to Visualize",
+                                options=list(metric_options.keys()),
+                                format_func=lambda x: metric_options[x],
+                                key="agg_metric_selector"
+                            )
+                        
+                        # Create and display chart
+                        fig = create_time_series_chart(
+                            daily_data,
+                            selected_metric,
+                            metric_options[selected_metric]
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        st.info("No daily data available for the selected campaign filter.")
         
         # Tab 2: Campaign Breakdown
         with tabs[2]:
@@ -733,9 +923,26 @@ def main():
                 with col2:
                     compare_end_camp = st.date_input("Compare End Date", key="camp_comp_end")
             
+            # Campaign filter
+            st.markdown("---")
+            campaign_filter_camp = st.text_input(
+                "Filter by Campaign Name (Optional)",
+                placeholder="Type campaign name to filter...",
+                help="Filter campaigns by name (partial match)",
+                key="camp_campaign_filter"
+            )
+            
             if st.button("📥 Load Campaign Data", key="load_camp_data", type="primary"):
                 with st.spinner("Fetching campaign data..."):
                     campaign_df = fetch_campaign_performance(
+                        st.session_state.client,
+                        st.session_state.customer_id,
+                        start_date_camp,
+                        end_date_camp
+                    )
+                    
+                    # Fetch daily data
+                    daily_df_camp = fetch_daily_performance(
                         st.session_state.client,
                         st.session_state.customer_id,
                         start_date_camp,
@@ -799,6 +1006,7 @@ def main():
                             campaign_df = merged_df
                         
                         st.session_state.campaign_data = campaign_df
+                        st.session_state.daily_data_camp = daily_df_camp
                         st.success("✅ Campaign data loaded!")
             
             # Display campaign table
@@ -807,33 +1015,84 @@ def main():
                 
                 df_display = st.session_state.campaign_data.copy()
                 
-                # Format the display
-                display_cols = ['campaign_name', 'cost', 'cpc', 'conv_value_cost', 'ctr', 'clicks', 
-                               'impressions', 'conversions_value', 'cost_per_conv', 'aov']
+                # Apply campaign filter
+                if campaign_filter_camp and campaign_filter_camp.strip():
+                    df_display = df_display[df_display['campaign_name'].str.contains(campaign_filter_camp, case=False, na=False)]
+                    
+                    if df_display.empty:
+                        st.warning(f"No campaigns found matching '{campaign_filter_camp}'")
+                    else:
+                        st.info(f"Showing {len(df_display)} campaign(s) matching: '{campaign_filter_camp}'")
                 
-                if 'cost_change' in df_display.columns:
-                    # Add change columns
-                    for metric in ['cost', 'cpc', 'conv_value_cost', 'ctr', 'clicks', 
-                                  'impressions', 'conversions_value', 'cost_per_conv', 'aov']:
-                        if f'{metric}_change' in df_display.columns:
-                            display_cols.append(f'{metric}_change')
-                
-                df_display = df_display[display_cols]
-                
-                # Rename columns for display
-                df_display.columns = df_display.columns.str.replace('_', ' ').str.title()
-                df_display = df_display.rename(columns={
-                    'Campaign Name': 'Campaign',
-                    'Conv Value Cost': 'Conv Value/Cost',
-                    'Conversions Value': 'Conv Value',
-                    'Cost Per Conv': 'Cost/Conv'
-                })
-                
-                st.dataframe(
-                    df_display,
-                    use_container_width=True,
-                    height=600
-                )
+                if not df_display.empty:
+                    # Format the display
+                    display_cols = ['campaign_name', 'cost', 'cpc', 'conv_value_cost', 'ctr', 'clicks', 
+                                   'impressions', 'conversions', 'conversions_value', 'cost_per_conv', 'aov']
+                    
+                    if 'cost_change' in df_display.columns:
+                        # Add change columns
+                        for metric in ['cost', 'cpc', 'conv_value_cost', 'ctr', 'clicks', 
+                                      'impressions', 'conversions', 'conversions_value', 'cost_per_conv', 'aov']:
+                            if f'{metric}_change' in df_display.columns:
+                                display_cols.append(f'{metric}_change')
+                    
+                    df_display = df_display[display_cols]
+                    
+                    # Rename columns for display
+                    df_display.columns = df_display.columns.str.replace('_', ' ').str.title()
+                    df_display = df_display.rename(columns={
+                        'Campaign Name': 'Campaign',
+                        'Conv Value Cost': 'Conv Value/Cost',
+                        'Conversions Value': 'Conv Value',
+                        'Cost Per Conv': 'Cost/Conv'
+                    })
+                    
+                    st.dataframe(
+                        df_display,
+                        use_container_width=True,
+                        height=600
+                    )
+                    
+                    # Time-series charts
+                    if hasattr(st.session_state, 'daily_data_camp') and st.session_state.daily_data_camp is not None and not st.session_state.daily_data_camp.empty:
+                        st.markdown("---")
+                        st.subheader("📈 Campaign Performance Over Time")
+                        
+                        daily_data_camp = st.session_state.daily_data_camp
+                        
+                        # Filter by campaign if needed
+                        if campaign_filter_camp and campaign_filter_camp.strip():
+                            daily_data_camp = daily_data_camp[daily_data_camp['campaign_name'].str.contains(campaign_filter_camp, case=False, na=False)]
+                        
+                        if not daily_data_camp.empty:
+                            # Metric selector
+                            metric_options = {
+                                'cost': 'Cost',
+                                'clicks': 'Clicks',
+                                'impressions': 'Impressions',
+                                'conversions': 'Conversions',
+                                'conversions_value': 'Conversion Value',
+                                'ctr': 'CTR (%)',
+                                'cpc': 'CPC',
+                                'conv_value_cost': 'Conv Value/Cost',
+                                'cost_per_conv': 'Cost per Conversion',
+                                'aov': 'Average Order Value'
+                            }
+                            
+                            selected_metric_camp = st.selectbox(
+                                "Select Metric to Visualize",
+                                options=list(metric_options.keys()),
+                                format_func=lambda x: metric_options[x],
+                                key="camp_metric_selector"
+                            )
+                            
+                            # Create and display chart
+                            fig = create_time_series_chart(
+                                daily_data_camp,
+                                selected_metric_camp,
+                                metric_options[selected_metric_camp]
+                            )
+                            st.plotly_chart(fig, use_container_width=True)
         
         # Tab 3: Product Breakdown
         with tabs[3]:
@@ -905,15 +1164,19 @@ def main():
                 st.markdown("---")
                 
                 # Filters
-                col1, col2, col3 = st.columns(3)
+                col1, col2, col3, col4 = st.columns(4)
                 
                 with col1:
                     product_title_filter = st.text_input("Filter by Product Title", key="prod_title_filter")
                 
                 with col2:
-                    min_spend = st.number_input("Min Spend ($)", min_value=0.0, value=0.0, key="min_spend")
+                    campaign_filter_prod = st.text_input("Filter by Campaign", key="prod_campaign_filter",
+                                                        help="Filter products by campaign name")
                 
                 with col3:
+                    min_spend = st.number_input("Min Spend ($)", min_value=0.0, value=0.0, key="min_spend")
+                
+                with col4:
                     min_aov = st.number_input("Min AOV ($)", min_value=0.0, value=0.0, key="min_aov")
                 
                 # Apply filters
@@ -939,7 +1202,7 @@ def main():
                 
                 # Format display
                 display_cols = ['product_title', 'cost', 'cpc', 'conv_value_cost', 'ctr', 'clicks', 
-                               'impressions', 'conversions_value', 'cost_per_conv', 'aov']
+                               'impressions', 'conversions', 'conversions_value', 'cost_per_conv', 'aov']
                 
                 df_display = df_display[display_cols]
                 

@@ -242,6 +242,20 @@ def process_dataframe(df):
     
     return df
 
+def recalculate_metrics(df):
+    """Recalculate derived metrics from already-converted cost values"""
+    if df.empty:
+        return df
+    
+    # DO NOT convert cost again - it's already in currency units
+    df['cpc'] = df.apply(lambda x: x['cost'] / x['clicks'] if x['clicks'] > 0 else 0, axis=1)
+    df['ctr'] = df.apply(lambda x: (x['clicks'] / x['impressions'] * 100) if x['impressions'] > 0 else 0, axis=1)
+    df['cost_per_conv'] = df.apply(lambda x: x['cost'] / x['conversions'] if x['conversions'] > 0 else 0, axis=1)
+    df['conv_value_cost'] = df.apply(lambda x: x['conversions_value'] / x['cost'] if x['cost'] > 0 else 0, axis=1)
+    df['aov'] = df.apply(lambda x: x['conversions_value'] / x['conversions'] if x['conversions'] > 0 else 0, axis=1)
+    
+    return df
+
 def fetch_daily_performance(client, customer_id, start_date, end_date):
     """Fetch daily performance data for time-series charts"""
     try:
@@ -1205,8 +1219,8 @@ def main():
                             'conversions_value': 'sum'
                         }).reset_index()
                         
-                        # Recalculate derived metrics
-                        agg_product_df = process_dataframe(agg_product_df)
+                        # Recalculate derived metrics (cost already converted, don't divide again!)
+                        agg_product_df = recalculate_metrics(agg_product_df)
                         
                         # Sort by cost
                         agg_product_df = agg_product_df.sort_values('cost', ascending=False)

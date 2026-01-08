@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 import yaml
 import tempfile
 import os
+import re
 
 # Page config
 st.set_page_config(
@@ -325,6 +326,8 @@ def fetch_change_history(client, customer_id, start_date, end_date):
                 change_event.change_resource_type,
                 change_event.resource_change_operation,
                 change_event.change_resource_name,
+                change_event.old_resource,
+                change_event.new_resource,
                 campaign.name,
                 campaign.id
             FROM change_event
@@ -339,31 +342,55 @@ def fetch_change_history(client, customer_id, start_date, end_date):
         
         data = []
         for row in response:
-            # Determine change type from resource_type and resource_name
+            # Convert to strings
             resource_type_str = str(row.change_event.change_resource_type)
             resource_name = str(row.change_event.change_resource_name).lower()
+            operation = str(row.change_event.resource_change_operation)
             
-            # Check if it's a budget or bid strategy change
-            is_budget = 'BUDGET' in resource_type_str.upper() or 'budget' in resource_name
-            is_bid_strategy = any(keyword in resource_name for keyword in [
-                'bidding_strategy', 'bid_strategy', 'maximize', 'target_cpa', 
-                'target_roas', 'manual_cpc', 'manual_cpm'
+            # Get old and new resource as strings
+            old_resource = str(row.change_event.old_resource) if hasattr(row.change_event, 'old_resource') else ''
+            new_resource = str(row.change_event.new_resource) if hasattr(row.change_event, 'new_resource') else ''
+            
+            # Combine for searching
+            change_content = f"{old_resource} {new_resource} {resource_name}".lower()
+            
+            # Check if it's a budget change
+            is_budget = (
+                'BUDGET' in resource_type_str.upper() or 
+                'budget' in resource_name or
+                'amount_micros' in change_content or
+                'budget_amount' in change_content
+            )
+            
+            # Check if it's a bid strategy change
+            is_bid_strategy = any(keyword in change_content for keyword in [
+                'bidding_strategy', 'bid_strategy', 'maximize_conversions', 
+                'maximize_conversion_value', 'target_cpa', 'target_roas', 
+                'manual_cpc', 'manual_cpm', 'target_spend', 'target_impression_share',
+                'percent_cpc', 'commission'
             ])
             
             # Only include budget or bid strategy changes
             if not (is_budget or is_bid_strategy):
                 continue
             
+            # Determine change type
             change_type = 'Budget Change' if is_budget else 'Bid Strategy Change'
+            
+            # Extract change details
+            change_details = extract_change_details(old_resource, new_resource, is_budget, is_bid_strategy)
             
             change_data = {
                 'change_datetime': row.change_event.change_date_time,
                 'resource_type': resource_type_str,
-                'operation': str(row.change_event.resource_change_operation),
+                'operation': operation,
                 'resource_name': row.change_event.change_resource_name,
                 'campaign_name': row.campaign.name if hasattr(row, 'campaign') and hasattr(row.campaign, 'name') else 'Unknown',
                 'campaign_id': str(row.campaign.id) if hasattr(row, 'campaign') and hasattr(row.campaign, 'id') else '',
-                'change_type': change_type
+                'change_type': change_type,
+                'change_details': change_details,
+                'old_resource': old_resource,
+                'new_resource': new_resource
             }
             
             data.append(change_data)
@@ -391,6 +418,119 @@ def fetch_change_history(client, customer_id, start_date, end_date):
     except Exception as e:
         st.error(f"Error fetching change history: {str(e)}")
         return pd.DataFrame()
+
+def extract_change_details(old_resource, new_resource, is_budget, is_bid_strategy):
+    """Extract human-readable change details from old and new resource strings"""
+    try:
+        details = []
+        
+        if is_budget:
+            # Extract budget amounts
+            old_amount = extract_budget_amount(old_resource)
+            new_amount = extract_budget_amount(new_resource)
+            
+            if old_amount and new_amount:
+                # Convert micros to currency
+                old_value = old_amount / 1_000_000
+                new_value = new_amount / 1_000_000
+                
+                if old_value != new_value:
+                    change_direction = "increased" if new_value > old_value else "decreased"
+                    details.append(f"Budget {change_direction} from {old_value:.2f} to {new_value:.2f}")
+            elif new_amount:
+                new_value = new_amount / 1_000_000
+                details.append(f"Budget set to {new_value:.2f}")
+            elif old_amount:
+                details.append(f"Budget removed")
+        
+        if is_bid_strategy:
+            # Extract bid strategy changes
+            old_strategy = extract_bid_strategy(old_resource)
+            new_strategy = extract_bid_strategy(new_resource)
+            
+            if old_strategy and new_strategy and old_strategy != new_strategy:
+                details.append(f"Strategy changed from {old_strategy} to {new_strategy}")
+            elif new_strategy:
+                details.append(f"Strategy set to {new_strategy}")
+            
+            # Extract Target CPA
+            old_cpa = extract_target_cpa(old_resource)
+            new_cpa = extract_target_cpa(new_resource)
+            if old_cpa and new_cpa and old_cpa != new_cpa:
+                old_val = old_cpa / 1_000_000
+                new_val = new_cpa / 1_000_000
+                change_dir = "increased" if new_val > old_val else "decreased"
+                details.append(f"Target CPA {change_dir} from {old_val:.2f} to {new_val:.2f}")
+            
+            # Extract Target ROAS
+            old_roas = extract_target_roas(old_resource)
+            new_roas = extract_target_roas(new_resource)
+            if old_roas and new_roas and old_roas != new_roas:
+                old_pct = old_roas * 100
+                new_pct = new_roas * 100
+                change_dir = "increased" if new_roas > old_roas else "decreased"
+                details.append(f"Target ROAS {change_dir} from {old_pct:.0f}% to {new_pct:.0f}%")
+        
+        return " | ".join(details) if details else "Change detected"
+    
+    except Exception as e:
+        return "Change detected"
+
+def extract_budget_amount(resource_str):
+    """Extract budget amount in micros from resource string"""
+    try:
+        # Look for amount_micros: <value>
+        match = re.search(r'amount_micros:\s*(\d+)', resource_str)
+        if match:
+            return int(match.group(1))
+    except:
+        pass
+    return None
+
+def extract_bid_strategy(resource_str):
+    """Extract bid strategy name from resource string"""
+    try:
+        if 'maximize_conversions' in resource_str.lower():
+            return 'Maximize Conversions'
+        elif 'maximize_conversion_value' in resource_str.lower():
+            return 'Maximize Conversion Value'
+        elif 'target_cpa' in resource_str.lower():
+            return 'Target CPA'
+        elif 'target_roas' in resource_str.lower():
+            return 'Target ROAS'
+        elif 'target_spend' in resource_str.lower():
+            return 'Target Spend'
+        elif 'manual_cpc' in resource_str.lower():
+            return 'Manual CPC'
+        elif 'manual_cpm' in resource_str.lower():
+            return 'Manual CPM'
+        elif 'percent_cpc' in resource_str.lower():
+            return 'Commission'
+    except:
+        pass
+    return None
+
+def extract_target_cpa(resource_str):
+    """Extract target CPA in micros from resource string"""
+    try:
+        # Look for target_cpa_micros: <value>
+        match = re.search(r'target_cpa_micros:\s*(\d+)', resource_str)
+        if match:
+            return int(match.group(1))
+    except:
+        pass
+    return None
+
+def extract_target_roas(resource_str):
+    """Extract target ROAS as decimal from resource string"""
+    try:
+        # Look for target_roas: <value>
+        match = re.search(r'target_roas:\s*([\d.]+)', resource_str)
+        if match:
+            return float(match.group(1))
+    except:
+        pass
+    return None
 
 def create_time_series_chart(df, metric, metric_label):
     """Create beautiful time-series chart similar to the uploaded image"""
@@ -1508,12 +1648,12 @@ def main():
                     st.markdown("---")
                     st.subheader("📋 Detailed Changes")
                     
-                    # Format display
-                    display_cols = ['date', 'time', 'campaign_name', 'change_type', 'operation']
+                    # Format display - show change details instead of operation
+                    display_cols = ['date', 'time', 'campaign_name', 'change_type', 'change_details']
                     df_display = df_history[display_cols].copy()
                     
                     # Rename columns
-                    df_display.columns = ['Date', 'Time', 'Campaign', 'Change Type', 'Operation']
+                    df_display.columns = ['Date', 'Time', 'Campaign', 'Change Type', 'Details']
                     
                     # Sort by date descending (most recent first)
                     df_display = df_display.sort_values('Date', ascending=False)

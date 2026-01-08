@@ -78,6 +78,8 @@ if 'daily_data' not in st.session_state:
     st.session_state.daily_data = None
 if 'daily_data_camp' not in st.session_state:
     st.session_state.daily_data_camp = None
+if 'change_history_data' not in st.session_state:
+    st.session_state.change_history_data = None
 
 # Helper Functions
 def create_google_ads_client(developer_token, client_id, client_secret, refresh_token, login_customer_id=None):
@@ -308,6 +310,109 @@ def fetch_daily_performance(client, customer_id, start_date, end_date):
         st.error(f"Error fetching daily data: {str(e)}")
         return pd.DataFrame()
 
+def fetch_change_history(client, customer_id, start_date, end_date):
+    """Fetch campaign-level change history for budget and bid strategy changes"""
+    try:
+        ga_service = client.get_service("GoogleAdsService")
+        
+        # Format datetime for query (need full datetime, not just date)
+        start_datetime = f"{format_date_for_query(start_date)} 00:00:00"
+        end_datetime = f"{format_date_for_query(end_date)} 23:59:59"
+        
+        query = f"""
+            SELECT
+                change_event.change_date_time,
+                change_event.change_resource_type,
+                change_event.resource_change_operation,
+                change_event.change_resource_name,
+                change_event.old_resource,
+                change_event.new_resource,
+                campaign.name,
+                campaign.id
+            FROM change_event
+            WHERE change_event.change_date_time >= '{start_datetime}'
+              AND change_event.change_date_time <= '{end_datetime}'
+              AND change_event.change_resource_type IN ('CAMPAIGN', 'CAMPAIGN_BUDGET')
+            ORDER BY change_event.change_date_time DESC
+            LIMIT 1000
+        """
+        
+        response = ga_service.search(customer_id=customer_id, query=query)
+        
+        data = []
+        for row in response:
+            change_data = {
+                'change_datetime': row.change_event.change_date_time,
+                'resource_type': row.change_event.change_resource_type,
+                'operation': row.change_event.resource_change_operation,
+                'resource_name': row.change_event.change_resource_name,
+                'campaign_name': row.campaign.name if hasattr(row, 'campaign') and hasattr(row.campaign, 'name') else 'Unknown',
+                'campaign_id': row.campaign.id if hasattr(row, 'campaign') and hasattr(row.campaign, 'id') else '',
+            }
+            
+            # Try to extract old and new values if available
+            try:
+                if hasattr(row.change_event, 'old_resource'):
+                    change_data['old_resource'] = str(row.change_event.old_resource)
+                else:
+                    change_data['old_resource'] = ''
+                    
+                if hasattr(row.change_event, 'new_resource'):
+                    change_data['new_resource'] = str(row.change_event.new_resource)
+                else:
+                    change_data['new_resource'] = ''
+            except:
+                change_data['old_resource'] = ''
+                change_data['new_resource'] = ''
+            
+            data.append(change_data)
+        
+        df = pd.DataFrame(data)
+        
+        if not df.empty:
+            # Parse datetime
+            df['change_datetime'] = pd.to_datetime(df['change_datetime'])
+            df['date'] = df['change_datetime'].dt.date
+            df['time'] = df['change_datetime'].dt.strftime('%H:%M:%S')
+            
+            # Filter for budget and bid strategy changes only
+            df['is_budget_change'] = df['old_resource'].str.contains('budget|amount_micros', case=False, na=False) | \
+                                     df['new_resource'].str.contains('budget|amount_micros', case=False, na=False) | \
+                                     df['resource_type'].str.contains('BUDGET', case=False, na=False)
+            
+            df['is_bid_strategy_change'] = df['old_resource'].str.contains('bidding_strategy|maximize|target_cpa|target_roas|manual', case=False, na=False) | \
+                                           df['new_resource'].str.contains('bidding_strategy|maximize|target_cpa|target_roas|manual', case=False, na=False)
+            
+            # Keep only budget or bid strategy changes
+            df = df[df['is_budget_change'] | df['is_bid_strategy_change']]
+            
+            # Determine change type
+            def determine_change_type(row):
+                if row['is_budget_change']:
+                    return 'Budget Change'
+                elif row['is_bid_strategy_change']:
+                    return 'Bid Strategy Change'
+                else:
+                    return 'Other'
+            
+            df['change_type'] = df.apply(determine_change_type, axis=1)
+            
+            # Clean up operation names
+            df['operation'] = df['operation'].replace({
+                'CREATE': 'Created',
+                'UPDATE': 'Updated',
+                'REMOVE': 'Removed'
+            })
+        
+        return df
+    
+    except GoogleAdsException as ex:
+        st.error(f"Google Ads API error fetching change history: {ex}")
+        return pd.DataFrame()
+    except Exception as e:
+        st.error(f"Error fetching change history: {str(e)}")
+        return pd.DataFrame()
+
 def create_time_series_chart(df, metric, metric_label):
     """Create beautiful time-series chart similar to the uploaded image"""
     
@@ -468,7 +573,7 @@ def main():
     if not st.session_state.authenticated:
         tab_list = ["🏠 Welcome & Setup"]
     else:
-        tab_list = ["🏠 Welcome & Setup", "📊 Aggregate Overview", "📈 Campaign Breakdown", "🛍️ Product Breakdown"]
+        tab_list = ["🏠 Welcome & Setup", "📊 Aggregate Overview", "📈 Campaign Breakdown", "🛍️ Product Breakdown", "📜 Change History"]
     
     tabs = st.tabs(tab_list)
     
@@ -486,6 +591,7 @@ def main():
             - **Aggregate Overview**: View total performance across all campaigns with filtering options
             - **Campaign Breakdown**: Detailed metrics for each campaign
             - **Product Breakdown**: Product-level performance analysis with filtering
+            - **Change History**: Track budget and bid strategy changes at campaign level
             - **Date Comparisons**: Compare performance across different time periods
             - **Interactive Visualizations**: Beautiful charts and metrics cards
             
@@ -605,6 +711,7 @@ def main():
             - **Aggregate Overview**: Total performance metrics
             - **Campaign Breakdown**: Campaign-level analysis
             - **Product Breakdown**: Product-level insights
+            - **Change History**: Budget and bid strategy changes
             """)
     
     # Tabs 1-3: Only show if authenticated
@@ -1293,6 +1400,187 @@ def main():
                     file_name=f"product_performance_{datetime.now().strftime('%Y%m%d')}.csv",
                     mime="text/csv"
                 )
+        
+        # Tab 4: Change History
+        with tabs[4]:
+            st.header("📜 Change History")
+            
+            st.markdown("""
+            Track budget and bid strategy changes at the campaign level. Monitor when changes were made
+            to help correlate performance shifts with account modifications.
+            """)
+            
+            # Date range selector
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                start_date_history = st.date_input(
+                    "Start Date",
+                    value=datetime.now() - timedelta(days=7),
+                    key="history_start_date"
+                )
+            
+            with col2:
+                end_date_history = st.date_input(
+                    "End Date",
+                    value=datetime.now(),
+                    key="history_end_date"
+                )
+            
+            # Campaign filter and change type filter
+            st.markdown("---")
+            col1, col2, col3 = st.columns([3, 2, 1])
+            
+            with col1:
+                campaign_filter_history = st.text_input(
+                    "Filter by Campaign Name (Optional)",
+                    placeholder="Type campaign name...",
+                    help="Filter changes by campaign name",
+                    key="history_campaign_filter"
+                )
+            
+            with col2:
+                change_type_filter = st.selectbox(
+                    "Change Type",
+                    ["All Changes", "Budget Changes Only", "Bid Strategy Changes Only"],
+                    key="history_change_type"
+                )
+            
+            with col3:
+                st.write("")  # Spacing
+                exact_match_history = st.checkbox("Exact match", value=False, key="history_exact_match")
+            
+            if st.button("📥 Load Change History", key="load_history_data", type="primary"):
+                with st.spinner("Fetching change history..."):
+                    history_df = fetch_change_history(
+                        st.session_state.client,
+                        st.session_state.customer_id,
+                        start_date_history,
+                        end_date_history
+                    )
+                    
+                    if not history_df.empty:
+                        st.session_state.change_history_data = history_df
+                        st.success(f"✅ Found {len(history_df)} change(s)!")
+                    else:
+                        st.session_state.change_history_data = None
+                        st.info("No budget or bid strategy changes found in the selected date range.")
+            
+            # Display change history
+            if st.session_state.change_history_data is not None and not st.session_state.change_history_data.empty:
+                st.markdown("---")
+                
+                df_history = st.session_state.change_history_data.copy()
+                
+                # Apply campaign filter
+                if campaign_filter_history and campaign_filter_history.strip():
+                    if exact_match_history:
+                        df_history = df_history[df_history['campaign_name'] == campaign_filter_history.strip()]
+                    else:
+                        df_history = df_history[df_history['campaign_name'].str.contains(campaign_filter_history, case=False, na=False)]
+                    
+                    if df_history.empty:
+                        st.warning(f"No changes found for campaigns matching '{campaign_filter_history}'")
+                    else:
+                        match_type = "exactly matching" if exact_match_history else "containing"
+                        st.info(f"Showing changes for campaigns {match_type}: '{campaign_filter_history}'")
+                
+                # Apply change type filter
+                if change_type_filter == "Budget Changes Only":
+                    df_history = df_history[df_history['change_type'] == 'Budget Change']
+                elif change_type_filter == "Bid Strategy Changes Only":
+                    df_history = df_history[df_history['change_type'] == 'Bid Strategy Change']
+                
+                if not df_history.empty:
+                    # Summary statistics
+                    st.subheader("📊 Change Summary")
+                    
+                    col1, col2, col3 = st.columns(3)
+                    
+                    with col1:
+                        total_changes = len(df_history)
+                        st.metric("Total Changes", total_changes)
+                    
+                    with col2:
+                        budget_changes = len(df_history[df_history['change_type'] == 'Budget Change'])
+                        st.metric("Budget Changes", budget_changes)
+                    
+                    with col3:
+                        bid_changes = len(df_history[df_history['change_type'] == 'Bid Strategy Change'])
+                        st.metric("Bid Strategy Changes", bid_changes)
+                    
+                    # Changes by operation type
+                    st.markdown("---")
+                    col1, col2, col3 = st.columns(3)
+                    
+                    with col1:
+                        created = len(df_history[df_history['operation'] == 'Created'])
+                        st.metric("Created", created)
+                    
+                    with col2:
+                        updated = len(df_history[df_history['operation'] == 'Updated'])
+                        st.metric("Updated", updated)
+                    
+                    with col3:
+                        removed = len(df_history[df_history['operation'] == 'Removed'])
+                        st.metric("Removed", removed)
+                    
+                    # Detailed changes table
+                    st.markdown("---")
+                    st.subheader("📋 Detailed Changes")
+                    
+                    # Format display
+                    display_cols = ['date', 'time', 'campaign_name', 'change_type', 'operation']
+                    df_display = df_history[display_cols].copy()
+                    
+                    # Rename columns
+                    df_display.columns = ['Date', 'Time', 'Campaign', 'Change Type', 'Operation']
+                    
+                    # Sort by date descending (most recent first)
+                    df_display = df_display.sort_values('Date', ascending=False)
+                    
+                    st.dataframe(
+                        df_display,
+                        use_container_width=True,
+                        height=600
+                    )
+                    
+                    # Download button
+                    csv = df_history.to_csv(index=False)
+                    st.download_button(
+                        label="📥 Download Change History CSV",
+                        data=csv,
+                        file_name=f"change_history_{datetime.now().strftime('%Y%m%d')}.csv",
+                        mime="text/csv"
+                    )
+                    
+                    # Additional info section
+                    with st.expander("ℹ️ About Change History"):
+                        st.markdown("""
+                        ### How Change History Works
+                        
+                        This tab tracks **campaign-level changes** for:
+                        - **Budget Changes**: Any modifications to campaign budgets
+                        - **Bid Strategy Changes**: Changes to bidding strategies (Manual CPC, Target CPA, Maximize Conversions, etc.)
+                        
+                        ### Change Operations
+                        - **Created**: New campaign or budget created
+                        - **Updated**: Existing campaign or budget modified
+                        - **Removed**: Campaign or budget deleted
+                        
+                        ### Tips
+                        - Default shows last 7 days of changes
+                        - Use campaign filter to focus on specific campaigns
+                        - Filter by change type to see only budget or bid strategy changes
+                        - Export to CSV for further analysis or record-keeping
+                        
+                        ### Limitations
+                        - Only shows campaign-level changes (not ad group or keyword changes)
+                        - Change history retained for up to 2 years
+                        - Very recent changes (< 1 hour) may not appear immediately
+                        """)
+                else:
+                    st.info("No changes match the selected filters.")
 
 if __name__ == "__main__":
     main()

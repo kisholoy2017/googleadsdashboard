@@ -85,8 +85,6 @@ if 'daily_data_comparison' not in st.session_state:
     st.session_state.daily_data_comparison = None
 if 'daily_data_camp_comparison' not in st.session_state:
     st.session_state.daily_data_camp_comparison = None
-if 'compare_option_camp' not in st.session_state:
-    st.session_state.compare_option_camp = 'None'
 
 # Helper Functions
 def create_google_ads_client(developer_token, client_id, client_secret, refresh_token, login_customer_id=None):
@@ -601,13 +599,6 @@ def create_time_series_chart(df, metric, metric_label):
 def create_multi_metric_chart(df_current, df_comparison, selected_metrics, metric_labels, show_comparison=False):
     """
     Create chart with up to 3 metrics and optional comparison period
-    
-    Parameters:
-    - df_current: DataFrame with current period daily data
-    - df_comparison: DataFrame with comparison period daily data (can be None)
-    - selected_metrics: List of up to 3 metric column names
-    - metric_labels: Dict mapping metric names to display labels
-    - show_comparison: Whether to show comparison period
     """
     
     fig = go.Figure()
@@ -727,14 +718,6 @@ def extract_percentage_change(details_str):
 def add_change_annotations(fig, df_changes, campaign_name, date_range, min_budget_pct=0, min_bid_pct=0):
     """
     Add change markers and annotations to campaign performance chart
-    
-    Parameters:
-    - fig: Plotly figure object
-    - df_changes: Change history DataFrame
-    - campaign_name: Name of campaign to show annotations for
-    - date_range: Tuple of (start_date, end_date) for filtering
-    - min_budget_pct: Minimum budget change % to show
-    - min_bid_pct: Minimum bid strategy change % to show
     """
     
     # Return early if no change data
@@ -1161,7 +1144,6 @@ def main():
                         
                         # Fetch comparison data if needed
                         comparison_df = pd.DataFrame()
-                        daily_comparison_df = pd.DataFrame()
                         if compare_option != "None":
                             days_diff = (end_date - start_date).days
                             
@@ -1188,14 +1170,6 @@ def main():
                                 comp_end
                             )
                             
-                            # Fetch daily comparison data for charts
-                            daily_comparison_df = fetch_daily_performance(
-                                st.session_state.client,
-                                st.session_state.customer_id,
-                                comp_start,
-                                comp_end
-                            )
-                            
                             if not comparison_df.empty:
                                 comparison_df = process_dataframe(comparison_df)
                         
@@ -1204,7 +1178,6 @@ def main():
                             'comparison': comparison_df,
                             'compare_option': compare_option
                         }
-                        st.session_state.daily_data_comparison = daily_comparison_df
                         st.session_state.data_loaded = True
                         st.success("✅ Data loaded successfully!")
                     else:
@@ -1355,65 +1328,47 @@ def main():
                     st.markdown("---")
                     st.subheader("📈 Performance Over Time")
                     
-                    daily_data = st.session_state.daily_data.copy()
-                    daily_data_comp = st.session_state.daily_data_comparison if st.session_state.daily_data_comparison is not None else pd.DataFrame()
+                    daily_data = st.session_state.daily_data
                     
                     # Filter daily data by campaign if needed
                     if campaign_filter and campaign_filter.strip():
                         if exact_match:
                             daily_data = daily_data[daily_data['campaign_name'] == campaign_filter.strip()]
-                            if not daily_data_comp.empty:
-                                daily_data_comp = daily_data_comp[daily_data_comp['campaign_name'] == campaign_filter.strip()]
                         else:
                             daily_data = daily_data[daily_data['campaign_name'].str.contains(campaign_filter, case=False, na=False)]
-                            if not daily_data_comp.empty:
-                                daily_data_comp = daily_data_comp[daily_data_comp['campaign_name'].str.contains(campaign_filter, case=False, na=False)]
                     
                     if not daily_data.empty:
-                        # Multi-metric selector (up to 3 metrics)
-                        metric_options = {
-                            'cost': 'Cost',
-                            'clicks': 'Clicks',
-                            'impressions': 'Impressions',
-                            'conversions': 'Conversions',
-                            'conversions_value': 'Conversion Value',
-                            'ctr': 'CTR (%)',
-                            'cpc': 'CPC',
-                            'conv_value_cost': 'Conv Value/Cost',
-                            'cost_per_conv': 'Cost per Conversion',
-                            'aov': 'Average Order Value'
-                        }
+                        # Metric selector
+                        col1, col2 = st.columns([3, 1])
                         
-                        selected_metrics = st.multiselect(
-                            "Select up to 3 metrics to visualize",
-                            options=list(metric_options.keys()),
-                            default=['cost', 'conversions'],
-                            max_selections=3,
-                            format_func=lambda x: metric_options[x],
-                            key="agg_metrics_selector"
-                        )
-                        
-                        if not selected_metrics:
-                            st.warning("Please select at least one metric to visualize")
-                        else:
-                            # Show comparison toggle if comparison data exists
-                            show_comparison = False
-                            if compare_opt != "None" and not daily_data_comp.empty:
-                                show_comparison = st.checkbox(
-                                    f"Show comparison with {compare_opt}",
-                                    value=True,
-                                    key="agg_show_comparison"
-                                )
+                        with col1:
+                            metric_options = {
+                                'cost': 'Cost',
+                                'clicks': 'Clicks',
+                                'impressions': 'Impressions',
+                                'conversions': 'Conversions',
+                                'conversions_value': 'Conversion Value',
+                                'ctr': 'CTR (%)',
+                                'cpc': 'CPC',
+                                'conv_value_cost': 'Conv Value/Cost',
+                                'cost_per_conv': 'Cost per Conversion',
+                                'aov': 'Average Order Value'
+                            }
                             
-                            # Create and display multi-metric chart
-                            fig = create_multi_metric_chart(
-                                daily_data,
-                                daily_data_comp if show_comparison else None,
-                                selected_metrics,
-                                metric_options,
-                                show_comparison
+                            selected_metric = st.selectbox(
+                                "Select Metric to Visualize",
+                                options=list(metric_options.keys()),
+                                format_func=lambda x: metric_options[x],
+                                key="agg_metric_selector"
                             )
-                            st.plotly_chart(fig, use_container_width=True)
+                        
+                        # Create and display chart
+                        fig = create_time_series_chart(
+                            daily_data,
+                            selected_metric,
+                            metric_options[selected_metric]
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
                     else:
                         st.info("No daily data available for the selected campaign filter.")
         
@@ -1483,13 +1438,17 @@ def main():
                         end_date_camp
                     )
                     
-                    # Fetch change history for the date range
-                    change_history_df = fetch_change_history(
-                        st.session_state.client,
-                        st.session_state.customer_id,
-                        start_date_camp,
-                        end_date_camp
-                    )
+                    # Fetch change history for annotations
+                    try:
+                        change_history_df = fetch_change_history(
+                            st.session_state.client,
+                            st.session_state.customer_id,
+                            start_date_camp,
+                            end_date_camp
+                        )
+                        st.session_state.change_history_data = change_history_df if not change_history_df.empty else None
+                    except:
+                        st.session_state.change_history_data = None
                     
                     if not campaign_df.empty:
                         campaign_df = process_dataframe(campaign_df)
@@ -1559,8 +1518,6 @@ def main():
                         st.session_state.campaign_data = campaign_df
                         st.session_state.daily_data_camp = daily_df_camp
                         st.session_state.daily_data_camp_comparison = daily_comparison_df_camp
-                        st.session_state.change_history_data = change_history_df
-                        st.session_state.compare_option_camp = compare_option_camp
                         st.success("✅ Campaign data loaded!")
             
             # Display campaign table
@@ -1617,71 +1574,45 @@ def main():
                         st.subheader("📈 Campaign Performance Over Time")
                         
                         daily_data_camp = st.session_state.daily_data_camp.copy()
-                        daily_data_camp_comp = st.session_state.daily_data_camp_comparison if hasattr(st.session_state, 'daily_data_camp_comparison') and st.session_state.daily_data_camp_comparison is not None else pd.DataFrame()
                         
                         # Filter by campaign if needed
-                        filtered_daily_camp = daily_data_camp.copy()
-                        filtered_daily_camp_comp = daily_data_camp_comp.copy() if not daily_data_camp_comp.empty else pd.DataFrame()
-                        
                         if campaign_filter_camp and campaign_filter_camp.strip():
                             if exact_match_camp:
-                                filtered_daily_camp = filtered_daily_camp[filtered_daily_camp['campaign_name'] == campaign_filter_camp.strip()]
-                                if not filtered_daily_camp_comp.empty:
-                                    filtered_daily_camp_comp = filtered_daily_camp_comp[filtered_daily_camp_comp['campaign_name'] == campaign_filter_camp.strip()]
+                                daily_data_camp = daily_data_camp[daily_data_camp['campaign_name'] == campaign_filter_camp.strip()]
                             else:
-                                filtered_daily_camp = filtered_daily_camp[filtered_daily_camp['campaign_name'].str.contains(campaign_filter_camp, case=False, na=False)]
-                                if not filtered_daily_camp_comp.empty:
-                                    filtered_daily_camp_comp = filtered_daily_camp_comp[filtered_daily_camp_comp['campaign_name'].str.contains(campaign_filter_camp, case=False, na=False)]
+                                daily_data_camp = daily_data_camp[daily_data_camp['campaign_name'].str.contains(campaign_filter_camp, case=False, na=False)]
                         
-                        if not filtered_daily_camp.empty:
-                            # Check if single campaign selected for change history annotations
-                            unique_campaigns = filtered_daily_camp['campaign_name'].unique()
-                            single_campaign_selected = len(unique_campaigns) == 1
+                        if not daily_data_camp.empty:
+                            # Check if single campaign for change annotations
+                            unique_campaigns = daily_data_camp['campaign_name'].unique()
+                            is_single_campaign = len(unique_campaigns) == 1
                             
-                            # Initialize threshold variables
-                            min_budget_change = 0
-                            min_bid_change = 0
-                            campaign_name_for_annotations = None
-                            
-                            if single_campaign_selected:
-                                campaign_name_for_annotations = unique_campaigns[0]
-                                
-                                # Show info about change history annotations
-                                st.info(f"📍 Viewing single campaign: **{campaign_name_for_annotations}**. Change history markers will be shown on the chart below. Strategy type changes (e.g., Manual CPC → Target CPA) are always displayed.")
+                            # Show info about change annotations
+                            if is_single_campaign:
+                                st.info(f"📍 Single campaign selected: **{unique_campaigns[0]}**. Change history markers will appear on the chart.")
                                 
                                 # Change threshold filters
-                                st.markdown("##### Change History Filters")
                                 col1, col2 = st.columns(2)
-                                
                                 with col1:
-                                    min_budget_change = st.slider(
-                                        "Minimum Budget Change % to Show",
-                                        min_value=0,
-                                        max_value=100,
-                                        value=10,
-                                        step=5,
-                                        help="Only show budget changes above this percentage. Budget creation/removal always shown.",
-                                        key="camp_min_budget_change"
+                                    min_budget_pct = st.slider(
+                                        "Min Budget Change %",
+                                        0, 100, 10, 5,
+                                        help="Show budget changes above this %",
+                                        key="camp_min_budget"
                                     )
-                                
                                 with col2:
-                                    min_bid_change = st.slider(
-                                        "Minimum Bid Strategy Change % to Show",
-                                        min_value=0,
-                                        max_value=100,
-                                        value=10,
-                                        step=5,
-                                        help="Only show bid strategy target changes above this percentage. Complete strategy type changes always shown.",
-                                        key="camp_min_bid_change"
+                                    min_bid_pct = st.slider(
+                                        "Min Bid Strategy Change %",
+                                        0, 100, 10, 5,
+                                        help="Show bid changes above this %",
+                                        key="camp_min_bid"
                                     )
                             else:
-                                if campaign_filter_camp and campaign_filter_camp.strip():
-                                    st.warning(f"📊 Change history annotations are only available when viewing a single campaign. Currently viewing {len(unique_campaigns)} campaigns. Use exact match filter to select one campaign.")
-                                else:
-                                    st.info("💡 To see change history markers on the chart, filter to a single campaign using the campaign name filter above.")
+                                st.info(f"💡 Viewing {len(unique_campaigns)} campaigns. Filter to one campaign to see change history markers.")
+                                min_budget_pct = 0
+                                min_bid_pct = 0
                             
                             # Multi-metric selector
-                            st.markdown("##### Select Metrics")
                             metric_options = {
                                 'cost': 'Cost',
                                 'clicks': 'Clicks',
@@ -1695,76 +1626,69 @@ def main():
                                 'aov': 'Average Order Value'
                             }
                             
-                            selected_metrics_camp = st.multiselect(
+                            selected_metrics = st.multiselect(
                                 "Select up to 3 metrics to visualize",
                                 options=list(metric_options.keys()),
                                 default=['cost', 'conversions'],
                                 max_selections=3,
                                 format_func=lambda x: metric_options[x],
-                                key="camp_metrics_selector"
+                                key="camp_metrics"
                             )
                             
-                            if not selected_metrics_camp:
-                                st.warning("Please select at least one metric to visualize")
-                            else:
-                                # Show comparison toggle if comparison data exists
-                                show_comparison_camp = False
-                                compare_opt_camp = st.session_state.get('compare_option_camp', 'None')
-                                if compare_opt_camp != "None" and not filtered_daily_camp_comp.empty:
-                                    show_comparison_camp = st.checkbox(
-                                        f"Show comparison with {compare_opt_camp}",
-                                        value=True,
-                                        key="camp_show_comparison"
-                                    )
+                            if selected_metrics:
+                                # Get comparison data if available
+                                daily_comp = st.session_state.daily_data_camp_comparison if hasattr(st.session_state, 'daily_data_camp_comparison') else None
+                                if daily_comp is not None and not daily_comp.empty:
+                                    # Filter comparison by same campaign filter
+                                    if campaign_filter_camp and campaign_filter_camp.strip():
+                                        if exact_match_camp:
+                                            daily_comp = daily_comp[daily_comp['campaign_name'] == campaign_filter_camp.strip()]
+                                        else:
+                                            daily_comp = daily_comp[daily_comp['campaign_name'].str.contains(campaign_filter_camp, case=False, na=False)]
+                                    
+                                    show_comp = st.checkbox("Show comparison", value=True, key="camp_show_comp")
+                                else:
+                                    daily_comp = None
+                                    show_comp = False
                                 
-                                # Create multi-metric chart
+                                # Create chart
                                 fig = create_multi_metric_chart(
-                                    filtered_daily_camp,
-                                    filtered_daily_camp_comp if show_comparison_camp else None,
-                                    selected_metrics_camp,
+                                    daily_data_camp,
+                                    daily_comp if show_comp else None,
+                                    selected_metrics,
                                     metric_options,
-                                    show_comparison_camp
+                                    show_comp
                                 )
                                 
-                                # Add change history annotations if single campaign selected
-                                if single_campaign_selected and campaign_name_for_annotations is not None:
+                                # Add change annotations if single campaign
+                                if is_single_campaign and st.session_state.change_history_data is not None:
                                     try:
-                                        if (st.session_state.change_history_data is not None and 
-                                            not st.session_state.change_history_data.empty and
-                                            'campaign_name' in st.session_state.change_history_data.columns):
-                                            date_range = (start_date_camp, end_date_camp)
-                                            fig = add_change_annotations(
-                                                fig,
-                                                st.session_state.change_history_data,
-                                                campaign_name_for_annotations,
-                                                date_range,
-                                                min_budget_change,
-                                                min_bid_change
-                                            )
-                                    except Exception as e:
-                                        # If annotation fails, still show the chart without annotations
-                                        pass
+                                        fig = add_change_annotations(
+                                            fig,
+                                            st.session_state.change_history_data,
+                                            unique_campaigns[0],
+                                            (start_date_camp, end_date_camp),
+                                            min_budget_pct,
+                                            min_bid_pct
+                                        )
+                                    except:
+                                        pass  # Chart still shows without annotations
                                 
                                 st.plotly_chart(fig, use_container_width=True)
                                 
-                                # Show change history table for this campaign if single campaign selected
-                                if single_campaign_selected and campaign_name_for_annotations is not None:
+                                # Show change table if single campaign
+                                if is_single_campaign and st.session_state.change_history_data is not None:
                                     try:
-                                        if (st.session_state.change_history_data is not None and
-                                            not st.session_state.change_history_data.empty and 
-                                            'campaign_name' in st.session_state.change_history_data.columns):
-                                            campaign_changes = st.session_state.change_history_data[
-                                                st.session_state.change_history_data['campaign_name'] == campaign_name_for_annotations
-                                            ]
-                                            
-                                            if not campaign_changes.empty:
-                                                with st.expander(f"📋 View {len(campaign_changes)} change(s) for this campaign"):
-                                                    display_changes = campaign_changes[['date', 'time', 'change_type', 'change_details']].copy()
-                                                    display_changes.columns = ['Date', 'Time', 'Change Type', 'Details']
-                                                    st.dataframe(display_changes, use_container_width=True)
-                                    except Exception as e:
-                                        # Silently skip if there's an issue with change history
+                                        changes = st.session_state.change_history_data[
+                                            st.session_state.change_history_data['campaign_name'] == unique_campaigns[0]
+                                        ]
+                                        if not changes.empty:
+                                            with st.expander(f"📋 View {len(changes)} change(s) for this campaign"):
+                                                st.dataframe(changes[['date', 'time', 'change_type', 'change_details']], use_container_width=True)
+                                    except:
                                         pass
+                            else:
+                                st.warning("Please select at least one metric to visualize")
         
         # Tab 3: Product Breakdown
         with tabs[3]:

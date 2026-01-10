@@ -1788,6 +1788,150 @@ def main():
             if st.session_state.product_data is not None and not st.session_state.product_data.empty:
                 st.markdown("---")
                 
+                # PRODUCT OVERVIEW KPIs
+                st.subheader("🏆 Product Performance Insights")
+                
+                df_products = st.session_state.product_data.copy()
+                
+                # Get top products
+                top_revenue_product = df_products.nlargest(1, 'conversions_value').iloc[0]
+                top_spend_product = df_products.nlargest(1, 'cost').iloc[0]
+                best_roas_product = df_products.nlargest(1, 'conv_value_cost').iloc[0]
+                
+                # Display KPI cards
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    st.markdown(f"""
+                    <div style="background: white; padding: 20px; border-radius: 8px; 
+                                box-shadow: 0 1px 3px rgba(0,0,0,0.08); border: 1px solid #e5e7eb;">
+                        <div style="font-size: 13px; font-weight: 500; color: #6b7280; 
+                                    text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px;">
+                            🥇 TOP REVENUE PRODUCT
+                        </div>
+                        <div style="font-size: 28px; font-weight: 700; color: #111827; margin-bottom: 8px;">
+                            ${top_revenue_product['conversions_value']:,.2f}
+                        </div>
+                        <div style="font-size: 14px; color: #6b7280; margin-bottom: 4px; 
+                                    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                            {top_revenue_product['product_title'][:50]}{'...' if len(top_revenue_product['product_title']) > 50 else ''}
+                        </div>
+                        <div style="font-size: 13px; color: #9ca3af;">
+                            {top_revenue_product['conversions']:.0f} conversions
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                with col2:
+                    st.markdown(f"""
+                    <div style="background: white; padding: 20px; border-radius: 8px; 
+                                box-shadow: 0 1px 3px rgba(0,0,0,0.08); border: 1px solid #e5e7eb;">
+                        <div style="font-size: 13px; font-weight: 500; color: #6b7280; 
+                                    text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px;">
+                            💰 HIGHEST SPEND PRODUCT
+                        </div>
+                        <div style="font-size: 28px; font-weight: 700; color: #111827; margin-bottom: 8px;">
+                            ${top_spend_product['cost']:,.2f}
+                        </div>
+                        <div style="font-size: 14px; color: #6b7280; margin-bottom: 4px; 
+                                    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                            {top_spend_product['product_title'][:50]}{'...' if len(top_spend_product['product_title']) > 50 else ''}
+                        </div>
+                        <div style="font-size: 13px; color: #9ca3af;">
+                            {top_spend_product['clicks']:.0f} clicks
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                with col3:
+                    st.markdown(f"""
+                    <div style="background: white; padding: 20px; border-radius: 8px; 
+                                box-shadow: 0 1px 3px rgba(0,0,0,0.08); border: 1px solid #e5e7eb;">
+                        <div style="font-size: 13px; font-weight: 500; color: #6b7280; 
+                                    text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px;">
+                            🎯 BEST ROAS PRODUCT
+                        </div>
+                        <div style="font-size: 28px; font-weight: 700; color: #111827; margin-bottom: 8px;">
+                            {best_roas_product['conv_value_cost']:.2f}x
+                        </div>
+                        <div style="font-size: 14px; color: #6b7280; margin-bottom: 4px; 
+                                    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                            {best_roas_product['product_title'][:50]}{'...' if len(best_roas_product['product_title']) > 50 else ''}
+                        </div>
+                        <div style="font-size: 13px; color: #9ca3af;">
+                            ${best_roas_product['conversions_value']:,.2f} revenue
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                # Chart for top products
+                st.markdown("### 📊 Top 5 Products Performance")
+                
+                top_5_products = df_products.nlargest(5, 'conversions_value')
+                
+                # Multi-metric selector for products
+                product_metric_options = {
+                    'cost': 'Cost',
+                    'conversions': 'Conversions',
+                    'conversions_value': 'Revenue',
+                    'conv_value_cost': 'ROAS',
+                    'clicks': 'Clicks',
+                    'cpc': 'CPC'
+                }
+                
+                selected_product_metrics = st.multiselect(
+                    "Select metrics to compare across top products",
+                    options=list(product_metric_options.keys()),
+                    default=['conversions_value', 'cost'],
+                    max_selections=3,
+                    format_func=lambda x: product_metric_options[x],
+                    key="product_metrics_selector"
+                )
+                
+                if selected_product_metrics:
+                    # Create grouped bar chart
+                    fig = go.Figure()
+                    
+                    colors = ['#1e88e5', '#43a047', '#e53935']
+                    
+                    # Truncate product names for readability
+                    product_names = [name[:30] + '...' if len(name) > 30 else name 
+                                    for name in top_5_products['product_title']]
+                    
+                    for idx, metric in enumerate(selected_product_metrics):
+                        fig.add_trace(go.Bar(
+                            name=product_metric_options[metric],
+                            x=product_names,
+                            y=top_5_products[metric],
+                            marker_color=colors[idx],
+                            text=top_5_products[metric].round(2),
+                            textposition='auto'
+                        ))
+                    
+                    fig.update_layout(
+                        barmode='group',
+                        title="Top 5 Products by Revenue",
+                        xaxis_title="Product",
+                        yaxis_title="Value",
+                        height=450,
+                        plot_bgcolor='white',
+                        paper_bgcolor='white',
+                        hovermode='x unified',
+                        legend=dict(
+                            orientation="h",
+                            yanchor="bottom",
+                            y=-0.3,
+                            xanchor="center",
+                            x=0.5
+                        )
+                    )
+                    
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info("Select at least one metric to visualize top products")
+                
+                st.markdown("---")
+                
                 # Filters for display
                 col1, col2, col3 = st.columns(3)
                 

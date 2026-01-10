@@ -737,95 +737,105 @@ def add_change_annotations(fig, df_changes, campaign_name, date_range, min_budge
     - min_bid_pct: Minimum bid strategy change % to show
     """
     
+    # Return early if no change data
     if df_changes is None or df_changes.empty:
         return fig
     
-    # Filter changes for this campaign and date range
-    campaign_changes = df_changes[
-        (df_changes['campaign_name'] == campaign_name) &
-        (df_changes['date'] >= date_range[0]) &
-        (df_changes['date'] <= date_range[1])
-    ].copy()
-    
-    if campaign_changes.empty:
+    # Check if required columns exist
+    required_cols = ['campaign_name', 'date', 'change_type', 'change_details']
+    if not all(col in df_changes.columns for col in required_cols):
         return fig
     
-    shapes = []
-    annotations = []
-    
-    for idx, change in campaign_changes.iterrows():
-        change_date = change['date']
-        change_type = change['change_type']
-        details = change['change_details']
+    try:
+        # Filter changes for this campaign and date range
+        campaign_changes = df_changes[
+            (df_changes['campaign_name'] == campaign_name) &
+            (df_changes['date'] >= date_range[0]) &
+            (df_changes['date'] <= date_range[1])
+        ].copy()
         
-        # Determine if we should show this annotation
-        show_annotation = False
-        color = '#6b7280'  # Default gray
+        if campaign_changes.empty:
+            return fig
         
-        if change_type == 'Budget Change':
-            pct_change = extract_percentage_change(details)
-            # Always show if budget was set/removed, or if it meets threshold
-            if 'set to' in details or 'removed' in details or pct_change >= min_budget_pct:
-                show_annotation = True
-                color = '#f59e0b'  # Orange for budget
+        shapes = []
+        annotations = []
         
-        elif change_type == 'Bid Strategy Change':
-            # Always show if strategy type completely changed
-            if 'Strategy changed' in details:
-                show_annotation = True
-            else:
-                # Check percentage threshold for target adjustments
+        for idx, change in campaign_changes.iterrows():
+            change_date = change['date']
+            change_type = change['change_type']
+            details = change['change_details']
+            
+            # Determine if we should show this annotation
+            show_annotation = False
+            color = '#6b7280'  # Default gray
+            
+            if change_type == 'Budget Change':
                 pct_change = extract_percentage_change(details)
-                if pct_change >= min_bid_pct:
+                # Always show if budget was set/removed, or if it meets threshold
+                if 'set to' in details or 'removed' in details or pct_change >= min_budget_pct:
                     show_annotation = True
-            color = '#8b5cf6'  # Purple for bid strategy
+                    color = '#f59e0b'  # Orange for budget
+            
+            elif change_type == 'Bid Strategy Change':
+                # Always show if strategy type completely changed
+                if 'Strategy changed' in details:
+                    show_annotation = True
+                else:
+                    # Check percentage threshold for target adjustments
+                    pct_change = extract_percentage_change(details)
+                    if pct_change >= min_bid_pct:
+                        show_annotation = True
+                color = '#8b5cf6'  # Purple for bid strategy
+            
+            if not show_annotation:
+                continue
+            
+            # Add vertical dashed line
+            shapes.append(dict(
+                type="line",
+                xref="x",
+                yref="paper",
+                x0=change_date,
+                x1=change_date,
+                y0=0,
+                y1=1,
+                line=dict(color=color, width=2, dash="dot"),
+                opacity=0.6
+            ))
+            
+            # Add annotation with arrow
+            # Truncate details if too long
+            short_details = details[:40] + "..." if len(details) > 40 else details
+            
+            annotations.append(dict(
+                x=change_date,
+                y=1.02,
+                xref="x",
+                yref="paper",
+                text=f"<b>{change_type.split()[0]}</b><br>{short_details}",
+                showarrow=True,
+                arrowhead=2,
+                arrowsize=1,
+                arrowwidth=2,
+                arrowcolor=color,
+                ax=0,
+                ay=-50,
+                bgcolor="rgba(255, 255, 255, 0.9)",
+                bordercolor=color,
+                borderwidth=2,
+                borderpad=4,
+                font=dict(size=9, color="#111827"),
+                align="center"
+            ))
         
-        if not show_annotation:
-            continue
-        
-        # Add vertical dashed line
-        shapes.append(dict(
-            type="line",
-            xref="x",
-            yref="paper",
-            x0=change_date,
-            x1=change_date,
-            y0=0,
-            y1=1,
-            line=dict(color=color, width=2, dash="dot"),
-            opacity=0.6
-        ))
-        
-        # Add annotation with arrow
-        # Truncate details if too long
-        short_details = details[:40] + "..." if len(details) > 40 else details
-        
-        annotations.append(dict(
-            x=change_date,
-            y=1.02,
-            xref="x",
-            yref="paper",
-            text=f"<b>{change_type.split()[0]}</b><br>{short_details}",
-            showarrow=True,
-            arrowhead=2,
-            arrowsize=1,
-            arrowwidth=2,
-            arrowcolor=color,
-            ax=0,
-            ay=-50,
-            bgcolor="rgba(255, 255, 255, 0.9)",
-            bordercolor=color,
-            borderwidth=2,
-            borderpad=4,
-            font=dict(size=9, color="#111827"),
-            align="center"
-        ))
-    
-    # Update figure with annotations
-    fig.update_layout(
-        shapes=shapes,
-        annotations=annotations
-    )
+        # Update figure with annotations
+        fig.update_layout(
+            shapes=shapes,
+            annotations=annotations
+        )
+    except Exception as e:
+        # If there's any error, just return the figure without annotations
+        pass
     
     return fig
 
@@ -1628,6 +1638,11 @@ def main():
                             unique_campaigns = filtered_daily_camp['campaign_name'].unique()
                             single_campaign_selected = len(unique_campaigns) == 1
                             
+                            # Initialize threshold variables
+                            min_budget_change = 0
+                            min_bid_change = 0
+                            campaign_name_for_annotations = None
+                            
                             if single_campaign_selected:
                                 campaign_name_for_annotations = unique_campaigns[0]
                                 
@@ -1712,30 +1727,44 @@ def main():
                                 )
                                 
                                 # Add change history annotations if single campaign selected
-                                if single_campaign_selected and st.session_state.change_history_data is not None:
-                                    date_range = (start_date_camp, end_date_camp)
-                                    fig = add_change_annotations(
-                                        fig,
-                                        st.session_state.change_history_data,
-                                        campaign_name_for_annotations,
-                                        date_range,
-                                        min_budget_change if single_campaign_selected else 0,
-                                        min_bid_change if single_campaign_selected else 0
-                                    )
+                                if single_campaign_selected and campaign_name_for_annotations is not None:
+                                    try:
+                                        if (st.session_state.change_history_data is not None and 
+                                            not st.session_state.change_history_data.empty and
+                                            'campaign_name' in st.session_state.change_history_data.columns):
+                                            date_range = (start_date_camp, end_date_camp)
+                                            fig = add_change_annotations(
+                                                fig,
+                                                st.session_state.change_history_data,
+                                                campaign_name_for_annotations,
+                                                date_range,
+                                                min_budget_change,
+                                                min_bid_change
+                                            )
+                                    except Exception as e:
+                                        # If annotation fails, still show the chart without annotations
+                                        pass
                                 
                                 st.plotly_chart(fig, use_container_width=True)
                                 
                                 # Show change history table for this campaign if single campaign selected
-                                if single_campaign_selected and st.session_state.change_history_data is not None:
-                                    campaign_changes = st.session_state.change_history_data[
-                                        st.session_state.change_history_data['campaign_name'] == campaign_name_for_annotations
-                                    ]
-                                    
-                                    if not campaign_changes.empty:
-                                        with st.expander(f"📋 View {len(campaign_changes)} change(s) for this campaign"):
-                                            display_changes = campaign_changes[['date', 'time', 'change_type', 'change_details']].copy()
-                                            display_changes.columns = ['Date', 'Time', 'Change Type', 'Details']
-                                            st.dataframe(display_changes, use_container_width=True)
+                                if single_campaign_selected and campaign_name_for_annotations is not None:
+                                    try:
+                                        if (st.session_state.change_history_data is not None and
+                                            not st.session_state.change_history_data.empty and 
+                                            'campaign_name' in st.session_state.change_history_data.columns):
+                                            campaign_changes = st.session_state.change_history_data[
+                                                st.session_state.change_history_data['campaign_name'] == campaign_name_for_annotations
+                                            ]
+                                            
+                                            if not campaign_changes.empty:
+                                                with st.expander(f"📋 View {len(campaign_changes)} change(s) for this campaign"):
+                                                    display_changes = campaign_changes[['date', 'time', 'change_type', 'change_details']].copy()
+                                                    display_changes.columns = ['Date', 'Time', 'Change Type', 'Details']
+                                                    st.dataframe(display_changes, use_container_width=True)
+                                    except Exception as e:
+                                        # Silently skip if there's an issue with change history
+                                        pass
         
         # Tab 3: Product Breakdown
         with tabs[3]:

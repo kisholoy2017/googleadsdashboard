@@ -263,6 +263,33 @@ def recalculate_metrics(df):
     
     return df
 
+def calculate_share_metrics(df):
+    """Calculate Share of Cost (SoC), Share of Revenue (SoR), and their ratio"""
+    if df.empty:
+        return df
+    
+    total_cost = df['cost'].sum()
+    total_revenue = df['conversions_value'].sum()
+    
+    # Calculate share percentages
+    if total_cost > 0:
+        df['soc'] = (df['cost'] / total_cost * 100)
+    else:
+        df['soc'] = 0
+    
+    if total_revenue > 0:
+        df['sor'] = (df['conversions_value'] / total_revenue * 100)
+    else:
+        df['sor'] = 0
+    
+    # Calculate ratio (SoC/SoR - lower is better, means more revenue share than cost share)
+    df['soc_sor_ratio'] = df.apply(
+        lambda row: row['soc'] / row['sor'] if row['sor'] > 0 else 0,
+        axis=1
+    )
+    
+    return df
+
 def fetch_daily_performance(client, customer_id, start_date, end_date):
     """Fetch daily performance data for time-series charts"""
     try:
@@ -918,6 +945,40 @@ def display_metric_card(label, value, change=None, metric_type='currency', inver
 # Main App
 def main():
     
+    # Custom CSS for bigger tabs
+    st.markdown("""
+    <style>
+    /* Make tabs bigger and more prominent */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 16px;
+        padding: 16px 0;
+        margin-bottom: 24px;
+        margin-top: -10px;
+    }
+    
+    .stTabs [data-baseweb="tab"] {
+        border-radius: 8px;
+        padding: 16px 28px;
+        font-weight: 600;
+        font-size: 17px;
+        border: none;
+        background-color: transparent;
+        color: #6b7280;
+    }
+    
+    .stTabs [aria-selected="true"] {
+        background-color: #eff6ff;
+        color: #1e40af;
+        font-size: 18px;
+        font-weight: 700;
+    }
+    
+    .stTabs [data-baseweb="tab"]:hover {
+        background-color: #f3f4f6;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+    
     # Tab navigation
     if not st.session_state.authenticated:
         tab_list = ["🏠 Welcome & Setup"]
@@ -1524,6 +1585,152 @@ def main():
             if st.session_state.campaign_data is not None and not st.session_state.campaign_data.empty:
                 st.markdown("---")
                 
+                # HERO CAMPAIGN PERFORMANCE INSIGHTS
+                st.subheader("🏆 Campaign Performance Insights")
+                
+                df_all_campaigns = st.session_state.campaign_data.copy()
+                
+                # Only show hero section if we have data
+                if len(df_all_campaigns) >= 1:
+                    # Get top campaigns (top 1 for each category)
+                    top_revenue_camp = df_all_campaigns.nlargest(1, 'conversions_value').iloc[0]
+                    top_spend_camp = df_all_campaigns.nlargest(1, 'cost').iloc[0]
+                    best_roas_camp = df_all_campaigns.nlargest(1, 'conv_value_cost').iloc[0]
+                    
+                    # Display KPI cards
+                    col1, col2, col3 = st.columns(3)
+                    
+                    with col1:
+                        st.markdown(f"""
+                        <div style="background: white; padding: 20px; border-radius: 8px; 
+                                    box-shadow: 0 1px 3px rgba(0,0,0,0.08); border: 1px solid #e5e7eb;">
+                            <div style="font-size: 13px; font-weight: 500; color: #6b7280; 
+                                        text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px;">
+                                🥇 TOP REVENUE CAMPAIGN
+                            </div>
+                            <div style="font-size: 28px; font-weight: 700; color: #111827; margin-bottom: 8px;">
+                                ${top_revenue_camp['conversions_value']:,.2f}
+                            </div>
+                            <div style="font-size: 14px; color: #6b7280; margin-bottom: 4px; 
+                                        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                                {top_revenue_camp['campaign_name'][:50]}{'...' if len(top_revenue_camp['campaign_name']) > 50 else ''}
+                            </div>
+                            <div style="font-size: 13px; color: #9ca3af;">
+                                {top_revenue_camp['conversions']:.0f} conversions
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    
+                    with col2:
+                        st.markdown(f"""
+                        <div style="background: white; padding: 20px; border-radius: 8px; 
+                                    box-shadow: 0 1px 3px rgba(0,0,0,0.08); border: 1px solid #e5e7eb;">
+                            <div style="font-size: 13px; font-weight: 500; color: #6b7280; 
+                                        text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px;">
+                                💰 HIGHEST SPEND CAMPAIGN
+                            </div>
+                            <div style="font-size: 28px; font-weight: 700; color: #111827; margin-bottom: 8px;">
+                                ${top_spend_camp['cost']:,.2f}
+                            </div>
+                            <div style="font-size: 14px; color: #6b7280; margin-bottom: 4px; 
+                                        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                                {top_spend_camp['campaign_name'][:50]}{'...' if len(top_spend_camp['campaign_name']) > 50 else ''}
+                            </div>
+                            <div style="font-size: 13px; color: #9ca3af;">
+                                {top_spend_camp['clicks']:.0f} clicks
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    
+                    with col3:
+                        st.markdown(f"""
+                        <div style="background: white; padding: 20px; border-radius: 8px; 
+                                    box-shadow: 0 1px 3px rgba(0,0,0,0.08); border: 1px solid #e5e7eb;">
+                            <div style="font-size: 13px; font-weight: 500; color: #6b7280; 
+                                        text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px;">
+                                🎯 BEST ROAS CAMPAIGN
+                            </div>
+                            <div style="font-size: 28px; font-weight: 700; color: #111827; margin-bottom: 8px;">
+                                {best_roas_camp['conv_value_cost']:.2f}x
+                            </div>
+                            <div style="font-size: 14px; color: #6b7280; margin-bottom: 4px; 
+                                        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                                {best_roas_camp['campaign_name'][:50]}{'...' if len(best_roas_camp['campaign_name']) > 50 else ''}
+                            </div>
+                            <div style="font-size: 13px; color: #9ca3af;">
+                                ${best_roas_camp['conversions_value']:,.2f} revenue
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    
+                    # Top 5 campaigns chart
+                    st.markdown("### 📊 Top 5 Campaigns Performance")
+                    
+                    top_5_campaigns = df_all_campaigns.nlargest(5, 'conversions_value')
+                    
+                    # Multi-metric selector for campaigns
+                    campaign_metric_options = {
+                        'cost': 'Cost',
+                        'conversions': 'Conversions',
+                        'conversions_value': 'Revenue',
+                        'conv_value_cost': 'ROAS',
+                        'clicks': 'Clicks',
+                        'cpc': 'CPC'
+                    }
+                    
+                    selected_campaign_metrics = st.multiselect(
+                        "Select metrics to compare across top campaigns",
+                        options=list(campaign_metric_options.keys()),
+                        default=['conversions_value', 'cost'],
+                        max_selections=3,
+                        format_func=lambda x: campaign_metric_options[x],
+                        key="hero_campaign_metrics_selector"
+                    )
+                    
+                    if selected_campaign_metrics:
+                        # Create grouped bar chart
+                        fig = go.Figure()
+                        
+                        colors = ['#1e88e5', '#43a047', '#e53935']
+                        
+                        # Truncate campaign names for readability
+                        campaign_names = [name[:30] + '...' if len(name) > 30 else name 
+                                        for name in top_5_campaigns['campaign_name']]
+                        
+                        for idx, metric in enumerate(selected_campaign_metrics):
+                            fig.add_trace(go.Bar(
+                                name=campaign_metric_options[metric],
+                                x=campaign_names,
+                                y=top_5_campaigns[metric],
+                                marker_color=colors[idx],
+                                text=top_5_campaigns[metric].round(2),
+                                textposition='auto'
+                            ))
+                        
+                        fig.update_layout(
+                            barmode='group',
+                            title="Top 5 Campaigns by Revenue",
+                            xaxis_title="Campaign",
+                            yaxis_title="Value",
+                            height=450,
+                            plot_bgcolor='white',
+                            paper_bgcolor='white',
+                            hovermode='x unified',
+                            legend=dict(
+                                orientation="h",
+                                yanchor="bottom",
+                                y=-0.3,
+                                xanchor="center",
+                                x=0.5
+                            )
+                        )
+                        
+                        st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        st.info("Select at least one metric to visualize top campaigns")
+                    
+                    st.markdown("---")
+                
                 df_display = st.session_state.campaign_data.copy()
                 
                 # Apply campaign filter
@@ -1540,9 +1747,13 @@ def main():
                         st.info(f"Showing {len(df_display)} campaign(s) {match_type}: '{campaign_filter_camp}'")
                 
                 if not df_display.empty:
+                    # Calculate share metrics (SoC, SoR, ratio)
+                    df_display = calculate_share_metrics(df_display)
+                    
                     # Format the display
-                    display_cols = ['campaign_name', 'cost', 'cpc', 'conv_value_cost', 'ctr', 'clicks', 
-                                   'impressions', 'conversions', 'conversions_value', 'cost_per_conv', 'aov']
+                    display_cols = ['campaign_name', 'cost', 'soc', 'conversions_value', 'sor', 'soc_sor_ratio',
+                                   'conv_value_cost', 'cpc', 'ctr', 'clicks', 
+                                   'impressions', 'conversions', 'cost_per_conv', 'aov']
                     
                     if 'cost_change' in df_display.columns:
                         # Add change columns
@@ -1557,9 +1768,12 @@ def main():
                     df_display.columns = df_display.columns.str.replace('_', ' ').str.title()
                     df_display = df_display.rename(columns={
                         'Campaign Name': 'Campaign',
-                        'Conv Value Cost': 'Conv Value/Cost',
-                        'Conversions Value': 'Conv Value',
-                        'Cost Per Conv': 'Cost/Conv'
+                        'Conv Value Cost': 'ROAS',
+                        'Conversions Value': 'Revenue',
+                        'Cost Per Conv': 'Cost/Conv',
+                        'Soc': 'SoC %',
+                        'Sor': 'SoR %',
+                        'Soc Sor Ratio': 'SoC/SoR'
                     })
                     
                     st.dataframe(
@@ -1965,18 +2179,25 @@ def main():
                 else:
                     df_display = df_filtered
                 
+                # Calculate share metrics (SoC, SoR, ratio) for filtered products
+                df_display = calculate_share_metrics(df_display)
+                
                 # Format display
-                display_cols = ['product_title', 'cost', 'cpc', 'conv_value_cost', 'ctr', 'clicks', 
-                               'impressions', 'conversions', 'conversions_value', 'cost_per_conv', 'aov']
+                display_cols = ['product_title', 'cost', 'soc', 'conversions_value', 'sor', 'soc_sor_ratio',
+                               'conv_value_cost', 'cpc', 'ctr', 'clicks', 
+                               'impressions', 'conversions', 'cost_per_conv', 'aov']
                 
                 df_display = df_display[display_cols]
                 
                 # Rename columns
                 df_display.columns = df_display.columns.str.replace('_', ' ').str.title()
                 df_display = df_display.rename(columns={
-                    'Conv Value Cost': 'Conv Value/Cost',
-                    'Conversions Value': 'Conv Value',
-                    'Cost Per Conv': 'Cost/Conv'
+                    'Conv Value Cost': 'ROAS',
+                    'Conversions Value': 'Revenue',
+                    'Cost Per Conv': 'Cost/Conv',
+                    'Soc': 'SoC %',
+                    'Sor': 'SoR %',
+                    'Soc Sor Ratio': 'SoC/SoR'
                 })
                 
                 st.dataframe(

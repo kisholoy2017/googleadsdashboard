@@ -303,15 +303,28 @@ def calculate_last_3_days_metrics(daily_df, campaign_budgets=None):
         return pd.DataFrame()
     
     try:
-        # Get date boundaries
-        today = datetime.now().date()
-        last_3_start = today - timedelta(days=3)
-        prev_3_start = today - timedelta(days=6)
-        prev_3_end = today - timedelta(days=4)
+        # Use the actual date range from the data, not today
+        max_date = daily_df['date'].max()
+        min_date = daily_df['date'].min()
+        
+        # Last 3 days of the dataset
+        last_3_start = max_date - timedelta(days=2)  # Last 3 days including max_date
+        
+        # Previous 3 days before that
+        prev_3_end = last_3_start - timedelta(days=1)
+        prev_3_start = prev_3_end - timedelta(days=2)
+        
+        # Check if we have enough data
+        if (max_date - min_date).days < 5:
+            # Not enough data for comparison
+            return pd.DataFrame()
         
         # Filter data for last 3 days and previous 3 days
         last_3 = daily_df[daily_df['date'] >= last_3_start].copy()
         prev_3 = daily_df[(daily_df['date'] >= prev_3_start) & (daily_df['date'] <= prev_3_end)].copy()
+        
+        if last_3.empty or prev_3.empty:
+            return pd.DataFrame()
         
         # Aggregate by campaign
         last_3_agg = last_3.groupby('campaign_name').agg({
@@ -1877,6 +1890,11 @@ def main():
                             for col in ['cost_last3', 'spend_delta_3d', 'revenue_delta_3d', 'delta_ratio_3d', 'budget_spent_3d_pct']:
                                 if col in df_display.columns:
                                     df_display[col] = df_display[col].fillna(0)
+                        else:
+                            # Not enough data for last 3 days comparison
+                            date_range_days = (st.session_state.daily_data_camp['date'].max() - st.session_state.daily_data_camp['date'].min()).days
+                            if date_range_days < 6:
+                                st.warning(f"⚠️ Last 3 days metrics require at least 6 days of data. Current range: {date_range_days} days. Please select a longer date range.")
                     
                     # Format the display
                     display_cols = ['campaign_name', 'budget', 'cost', 'soc', 'conversions_value', 'sor', 'soc_sor_ratio']
@@ -1902,6 +1920,15 @@ def main():
                     
                     # Show delta summary if last 3 days data available
                     if 'spend_delta_3d' in df_display.columns and 'revenue_delta_3d' in df_display.columns:
+                        # Show date range used for calculations
+                        if hasattr(st.session_state, 'daily_data_camp') and st.session_state.daily_data_camp is not None:
+                            max_date = st.session_state.daily_data_camp['date'].max()
+                            last_3_start = max_date - timedelta(days=2)
+                            prev_3_end = last_3_start - timedelta(days=1)
+                            prev_3_start = prev_3_end - timedelta(days=2)
+                            
+                            st.info(f"📅 **Last 3 Days Analysis:** {last_3_start.strftime('%b %d')} - {max_date.strftime('%b %d, %Y')} vs Previous 3 Days: {prev_3_start.strftime('%b %d')} - {prev_3_end.strftime('%b %d, %Y')}")
+                        
                         st.markdown("#### 📊 Last 3 Days Performance Overview")
                         
                         # Calculate aggregates

@@ -141,7 +141,7 @@ def calculate_metrics(row):
     return metrics
 
 def fetch_campaign_performance(client, customer_id, start_date, end_date):
-    """Fetch campaign performance data"""
+    """Fetch campaign performance data with budget"""
     try:
         ga_service = client.get_service("GoogleAdsService")
         
@@ -150,6 +150,7 @@ def fetch_campaign_performance(client, customer_id, start_date, end_date):
                 campaign.id,
                 campaign.name,
                 campaign.status,
+                campaign_budget.amount_micros,
                 metrics.cost_micros,
                 metrics.clicks,
                 metrics.impressions,
@@ -168,10 +169,16 @@ def fetch_campaign_performance(client, customer_id, start_date, end_date):
         
         data = []
         for row in response:
+            # Get budget amount (convert from micros)
+            budget = 0
+            if hasattr(row, 'campaign_budget') and hasattr(row.campaign_budget, 'amount_micros'):
+                budget = row.campaign_budget.amount_micros / 1_000_000
+            
             campaign_data = {
                 'campaign_id': row.campaign.id,
                 'campaign_name': row.campaign.name,
                 'campaign_status': row.campaign.status.name,
+                'budget': budget,
                 'cost': row.metrics.cost_micros,
                 'clicks': row.metrics.clicks,
                 'impressions': row.metrics.impressions,
@@ -289,6 +296,92 @@ def calculate_share_metrics(df):
     )
     
     return df
+
+def calculate_last_3_days_metrics(daily_df, campaign_budgets=None):
+    """Calculate last 3 days vs previous 3 days metrics for campaigns"""
+    if daily_df is None or daily_df.empty:
+        return pd.DataFrame()
+    
+    try:
+        # Get date boundaries
+        today = datetime.now().date()
+        last_3_start = today - timedelta(days=3)
+        prev_3_start = today - timedelta(days=6)
+        prev_3_end = today - timedelta(days=4)
+        
+        # Filter data for last 3 days and previous 3 days
+        last_3 = daily_df[daily_df['date'] >= last_3_start].copy()
+        prev_3 = daily_df[(daily_df['date'] >= prev_3_start) & (daily_df['date'] <= prev_3_end)].copy()
+        
+        # Aggregate by campaign
+        last_3_agg = last_3.groupby('campaign_name').agg({
+            'cost': 'sum',
+            'conversions_value': 'sum'
+        }).reset_index()
+        last_3_agg.columns = ['campaign_name', 'cost_last3', 'revenue_last3']
+        
+        prev_3_agg = prev_3.groupby('campaign_name').agg({
+            'cost': 'sum',
+            'conversions_value': 'sum'
+        }).reset_index()
+        prev_3_agg.columns = ['campaign_name', 'cost_prev3', 'revenue_prev3']
+        
+        # Merge
+        merged = last_3_agg.merge(prev_3_agg, on='campaign_name', how='outer')
+        merged = merged.fillna(0)
+        
+        # Calculate deltas (% change)
+        merged['spend_delta_3d'] = merged.apply(
+            lambda x: ((x['cost_last3'] - x['cost_prev3']) / x['cost_prev3'] * 100) if x['cost_prev3'] > 0 else 0,
+            axis=1
+        )
+        
+        merged['revenue_delta_3d'] = merged.apply(
+            lambda x: ((x['revenue_last3'] - x['revenue_prev3']) / x['revenue_prev3'] * 100) if x['revenue_prev3'] > 0 else 0,
+            axis=1
+        )
+        
+        # Calculate delta ratio (revenue delta / spend delta)
+        merged['delta_ratio_3d'] = merged.apply(
+            lambda x: x['revenue_delta_3d'] / x['spend_delta_3d'] if abs(x['spend_delta_3d']) > 0.1 else 0,
+            axis=1
+        )
+        
+        # Add budget % spent if budgets provided
+        if campaign_budgets is not None and not campaign_budgets.empty:
+            merged = merged.merge(campaign_budgets[['campaign_name', 'budget']], on='campaign_name', how='left')
+            merged['budget_spent_3d_pct'] = merged.apply(
+                lambda x: (x['cost_last3'] / x['budget'] * 100) if x.get('budget', 0) > 0 else 0,
+                axis=1
+            )
+        
+        # Keep only needed columns
+        result_cols = ['campaign_name', 'cost_last3', 'spend_delta_3d', 'revenue_delta_3d', 'delta_ratio_3d']
+        if 'budget_spent_3d_pct' in merged.columns:
+            result_cols.append('budget_spent_3d_pct')
+        
+        return merged[result_cols]
+        
+    except Exception as e:
+        print(f"Error calculating last 3 days metrics: {e}")
+        return pd.DataFrame()
+
+def format_delta_html(value, reverse_colors=False):
+    """Format delta with colored arrow for HTML display"""
+    if abs(value) < 0.1:
+        return "0.0%"
+    
+    arrow = "▲" if value > 0 else "▼"
+    
+    # Determine color based on direction and context
+    if reverse_colors:
+        # For costs - lower is better (green), higher is worse (red)
+        color = "#dc2626" if value > 0 else "#059669"
+    else:
+        # For revenue - higher is better (green), lower is worse (red)
+        color = "#059669" if value > 0 else "#dc2626"
+    
+    return f'<span style="color: {color}; font-weight: 600;">{arrow} {abs(value):.1f}%</span>'
 
 def fetch_daily_performance(client, customer_id, start_date, end_date):
     """Fetch daily performance data for time-series charts"""
@@ -1768,10 +1861,33 @@ def main():
                     # Calculate share metrics (SoC, SoR, ratio)
                     df_display = calculate_share_metrics(df_display)
                     
+                    # Calculate last 3 days metrics if daily data available
+                    if hasattr(st.session_state, 'daily_data_camp') and st.session_state.daily_data_camp is not None:
+                        # Prepare budget data for last 3 days calculation
+                        budget_df = df_display[['campaign_name', 'budget']].copy() if 'budget' in df_display.columns else None
+                        
+                        # Calculate last 3 days metrics
+                        last_3d_metrics = calculate_last_3_days_metrics(st.session_state.daily_data_camp, budget_df)
+                        
+                        if not last_3d_metrics.empty:
+                            # Merge with display dataframe
+                            df_display = df_display.merge(last_3d_metrics, on='campaign_name', how='left')
+                            
+                            # Fill NaN values
+                            for col in ['cost_last3', 'spend_delta_3d', 'revenue_delta_3d', 'delta_ratio_3d', 'budget_spent_3d_pct']:
+                                if col in df_display.columns:
+                                    df_display[col] = df_display[col].fillna(0)
+                    
                     # Format the display
-                    display_cols = ['campaign_name', 'cost', 'soc', 'conversions_value', 'sor', 'soc_sor_ratio',
-                                   'conv_value_cost', 'cpc', 'ctr', 'clicks', 
-                                   'impressions', 'conversions', 'cost_per_conv', 'aov']
+                    display_cols = ['campaign_name', 'budget', 'cost', 'soc', 'conversions_value', 'sor', 'soc_sor_ratio']
+                    
+                    # Add last 3 days columns if available
+                    if 'cost_last3' in df_display.columns:
+                        display_cols.extend(['cost_last3', 'budget_spent_3d_pct', 'spend_delta_3d', 'revenue_delta_3d', 'delta_ratio_3d'])
+                    
+                    # Add remaining metrics
+                    display_cols.extend(['conv_value_cost', 'cpc', 'ctr', 'clicks', 
+                                       'impressions', 'conversions', 'cost_per_conv', 'aov'])
                     
                     if 'cost_change' in df_display.columns:
                         # Add change columns
@@ -1780,22 +1896,90 @@ def main():
                             if f'{metric}_change' in df_display.columns:
                                 display_cols.append(f'{metric}_change')
                     
-                    df_display = df_display[display_cols]
+                    # Keep only existing columns
+                    display_cols = [col for col in display_cols if col in df_display.columns]
+                    df_display_table = df_display[display_cols].copy()
+                    
+                    # Show delta summary if last 3 days data available
+                    if 'spend_delta_3d' in df_display.columns and 'revenue_delta_3d' in df_display.columns:
+                        st.markdown("#### 📊 Last 3 Days Performance Overview")
+                        
+                        # Calculate aggregates
+                        total_spend_delta = df_display['spend_delta_3d'].mean()
+                        total_revenue_delta = df_display['revenue_delta_3d'].mean()
+                        avg_delta_ratio = df_display['delta_ratio_3d'].mean()
+                        
+                        col1, col2, col3 = st.columns(3)
+                        
+                        with col1:
+                            spend_arrow = "▲" if total_spend_delta > 0 else "▼"
+                            spend_color = "#dc2626" if total_spend_delta > 0 else "#059669"
+                            st.markdown(f"""
+                            <div style="background: white; padding: 16px; border-radius: 8px; 
+                                        box-shadow: 0 1px 3px rgba(0,0,0,0.08); border: 1px solid #e5e7eb;">
+                                <div style="font-size: 12px; color: #6b7280; margin-bottom: 4px;">
+                                    AVG SPEND CHANGE (3D)
+                                </div>
+                                <div style="font-size: 24px; font-weight: 700; color: {spend_color};">
+                                    {spend_arrow} {abs(total_spend_delta):.1f}%
+                                </div>
+                            </div>
+                            """, unsafe_allow_html=True)
+                        
+                        with col2:
+                            rev_arrow = "▲" if total_revenue_delta > 0 else "▼"
+                            rev_color = "#059669" if total_revenue_delta > 0 else "#dc2626"
+                            st.markdown(f"""
+                            <div style="background: white; padding: 16px; border-radius: 8px; 
+                                        box-shadow: 0 1px 3px rgba(0,0,0,0.08); border: 1px solid #e5e7eb;">
+                                <div style="font-size: 12px; color: #6b7280; margin-bottom: 4px;">
+                                    AVG REVENUE CHANGE (3D)
+                                </div>
+                                <div style="font-size: 24px; font-weight: 700; color: {rev_color};">
+                                    {rev_arrow} {abs(total_revenue_delta):.1f}%
+                                </div>
+                            </div>
+                            """, unsafe_allow_html=True)
+                        
+                        with col3:
+                            ratio_color = "#059669" if avg_delta_ratio >= 1 else "#9ca3af"
+                            st.markdown(f"""
+                            <div style="background: white; padding: 16px; border-radius: 8px; 
+                                        box-shadow: 0 1px 3px rgba(0,0,0,0.08); border: 1px solid #e5e7eb;">
+                                <div style="font-size: 12px; color: #6b7280; margin-bottom: 4px;">
+                                    AVG DELTA RATIO (3D)
+                                </div>
+                                <div style="font-size: 24px; font-weight: 700; color: {ratio_color};">
+                                    {avg_delta_ratio:.2f}x
+                                </div>
+                                <div style="font-size: 11px; color: #9ca3af; margin-top: 4px;">
+                                    {"✅ Revenue growing faster" if avg_delta_ratio >= 1 else "⚠️ Monitor closely"}
+                                </div>
+                            </div>
+                            """, unsafe_allow_html=True)
+                        
+                        st.markdown("---")
                     
                     # Rename columns for display
-                    df_display.columns = df_display.columns.str.replace('_', ' ').str.title()
-                    df_display = df_display.rename(columns={
+                    df_display_table.columns = df_display_table.columns.str.replace('_', ' ').str.title()
+                    df_display_table = df_display_table.rename(columns={
                         'Campaign Name': 'Campaign',
+                        'Budget': 'Daily Budget',
                         'Conv Value Cost': 'ROAS',
                         'Conversions Value': 'Revenue',
                         'Cost Per Conv': 'Cost/Conv',
                         'Soc': 'SoC %',
                         'Sor': 'SoR %',
-                        'Soc Sor Ratio': 'SoC/SoR'
+                        'Soc Sor Ratio': 'SoC/SoR',
+                        'Cost Last3': 'Last 3d Spend',
+                        'Budget Spent 3D Pct': 'Budget % (3d)',
+                        'Spend Delta 3D': 'Δ Spend %',
+                        'Revenue Delta 3D': 'Δ Revenue %',
+                        'Delta Ratio 3D': 'Δ Ratio'
                     })
                     
                     st.dataframe(
-                        df_display,
+                        df_display_table,
                         use_container_width=True,
                         height=600
                     )
